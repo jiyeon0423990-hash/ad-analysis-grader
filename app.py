@@ -379,17 +379,16 @@ question_name = st.selectbox("문항을 선택하세요.", list(RULES[ad_name].k
 
 rule = RULES[ad_name][question_name]
 
-with st.expander("📌 모범 답안 및 채점 기준 보기"):
-    st.markdown("**모범 답안**")
-    for i, ans in enumerate(rule["model_answers"], 1):
-        st.write(f"{i}. {ans}")
-    st.markdown("**채점 메모**")
-    st.write(rule["note"])
+# 문항별 오답 횟수를 세션에 저장
+attempt_key = f"attempts::{ad_name}::{question_name}"
+if attempt_key not in st.session_state:
+    st.session_state[attempt_key] = 0
 
 answer = st.text_area(
     "학생 답안",
     height=130,
-    placeholder="학생의 답안을 입력하세요."
+    placeholder="학생의 답안을 입력하세요.",
+    key=f"answer::{ad_name}::{question_name}"
 )
 
 if st.button("채점하기", type="primary", use_container_width=True):
@@ -397,14 +396,27 @@ if st.button("채점하기", type="primary", use_container_width=True):
 
     if passed:
         st.success("✅ 정답으로 인정합니다.")
+        st.write("**채점 피드백:**", feedback)
     else:
-        st.error("❌ 정답으로 인정하기 어렵습니다.")
+        st.session_state[attempt_key] += 1
+        wrong_count = st.session_state[attempt_key]
 
-    st.write("**채점 피드백:**", feedback)
+        st.error(f"❌ 정답으로 인정하기 어렵습니다. (오답 {wrong_count}회)")
+        st.write("**채점 피드백:**", feedback)
 
-    with st.expander("모범 답안 다시 보기"):
-        for i, ans in enumerate(rule["model_answers"], 1):
-            st.write(f"{i}. {ans}")
+        # 2회 이상 틀린 경우에만 모범답안과 채점 기준 공개
+        if wrong_count >= 2:
+            st.warning("두 번 이상 틀렸습니다. 아래의 모범답안과 채점 기준을 확인해 보세요.")
+
+            with st.expander("📌 모범 답안 및 채점 기준 보기", expanded=True):
+                st.markdown("**모범 답안**")
+                for i, ans in enumerate(rule["model_answers"], 1):
+                    st.write(f"{i}. {ans}")
+
+                st.markdown("**채점 메모**")
+                st.write(rule["note"])
+        else:
+            st.info("한 번 더 생각해서 다시 답해 보세요. 모범답안은 두 번 틀렸을 때부터 확인할 수 있습니다.")
 
 
 st.divider()
