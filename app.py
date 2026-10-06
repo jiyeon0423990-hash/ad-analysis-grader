@@ -329,6 +329,59 @@ RULES = {
 }
 
 
+
+# ------------------------------------------------------------
+# 3) 광고 자료(영상/이미지)
+# ------------------------------------------------------------
+
+MEDIA = {
+    "1번 광고 | 톡 쳤을 뿐인데": {
+        "type": "video",
+        "src": "https://www.youtube.com/watch?v=1oJVTGnDySc",
+        "caption": "영상 공익광고 | 공익광고협의회 「톡 쳤을 뿐인데」"
+    },
+    "2번 광고 | 빙그레 똑같을까? 다를까?": {
+        "type": "video",
+        "src": "https://www.youtube.com/watch?v=EAcTDhAKQZc",
+        "caption": "영상 상업광고 | 빙그레 「똑같을까? 다를까?」"
+    },
+    "3번 광고 | 이민 갈 행성은 없습니다": {
+        "type": "image",
+        "src": "media/ad3_planet.jpg",
+        "caption": "공익광고 | 「이민 갈 행성은 없습니다」"
+    },
+    "4번 광고 | 코카콜라 마시자 코카·콜라!": {
+        "type": "image",
+        "src": "media/ad4_cocacola.jpg",
+        "caption": "상업광고 | 코카콜라 「마시자 코카·콜라!」"
+    },
+}
+
+
+def show_media(ad_name):
+    """선택한 광고의 영상 또는 이미지를 문항 위에 표시."""
+    media = MEDIA.get(ad_name)
+
+    if not media:
+        return
+
+    st.subheader("🎬 광고 자료")
+
+    if media["type"] == "video":
+        st.video(media["src"])
+    elif media["type"] == "image":
+        try:
+            st.image(media["src"], use_container_width=True)
+        except Exception:
+            st.warning(
+                "광고 이미지 파일을 불러오지 못했습니다. "
+                "GitHub 저장소의 media 폴더에 이미지 파일이 있는지 확인해 주세요."
+            )
+
+    st.caption(media.get("caption", ""))
+    st.divider()
+
+
 # ------------------------------------------------------------
 # 3) 채점 함수
 # ------------------------------------------------------------
@@ -378,6 +431,11 @@ ad_name = st.selectbox("광고를 선택하세요.", list(RULES.keys()))
 question_name = st.selectbox("문항을 선택하세요.", list(RULES[ad_name].keys()))
 
 rule = RULES[ad_name][question_name]
+
+# 선택한 광고의 영상/이미지를 문항 위에 표시
+show_media(ad_name)
+
+st.subheader(f"✏️ {question_name}")
 
 # 문항별 오답 횟수를 세션에 저장
 attempt_key = f"attempts::{ad_name}::{question_name}"
