@@ -1,0 +1,648 @@
+
+import re
+import streamlit as st
+
+st.set_page_config(
+    page_title="광고·홍보물 자동 채점",
+    page_icon="📝",
+    layout="wide"
+)
+
+# ------------------------------------------------------------
+# 1) 공통 유틸리티
+# ------------------------------------------------------------
+
+def normalize(text: str) -> str:
+    """띄어쓰기·문장부호 차이를 줄여 비교하기 위한 간단한 정규화."""
+    text = (text or "").lower().strip()
+    text = re.sub(r"[·ㆍ•,.'\"“”‘’!?~:;()\[\]{}<>/\-_]", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def contains_any(text: str, expressions):
+    """표현 후보 중 하나라도 답안에 포함되면 True."""
+    t = normalize(text)
+    return any(normalize(exp) in t for exp in expressions)
+
+
+def group_hit(text: str, group):
+    """하나의 의미군 안에서 하나 이상의 표현이 맞는지 확인."""
+    return contains_any(text, group)
+
+
+def all_groups_hit(text: str, groups):
+    """모든 필수 의미군이 충족되는지 확인."""
+    return all(group_hit(text, g) for g in groups)
+
+
+def any_group_hit(text: str, groups):
+    """여러 대안 의미군 중 하나라도 충족되는지 확인."""
+    return any(group_hit(text, g) for g in groups)
+
+
+def misconception_hit(text: str, misconception_groups):
+    """오개념/개념 혼동 표현 감지."""
+    return any(group_hit(text, g) for g in misconception_groups)
+
+
+# ------------------------------------------------------------
+# 2) 채점 규칙
+#    - required_all: 모두 충족해야 하는 의미군
+#    - required_any: 여러 대안 중 하나 이상 충족
+#    - forbidden: 오개념·개념 혼동·결론 반전
+# ------------------------------------------------------------
+
+RULES = {
+    "1번 광고 | 톡 쳤을 뿐인데": {
+        "1번 문항 | 선택된 문구": {
+            "model_answers": [
+                "‘톡 쳤을 뿐인데’라는 문구가 선택되었다.",
+                "‘톡’, ‘툭’과 같은 표현이 선택되었다."
+            ],
+            "required_any": [
+                ["톡쳤을뿐인데"],
+                ["톡", "툭"]
+            ],
+            "forbidden": [
+                ["스마트폰", "단체채팅", "채팅방", "메시지"],
+                ["사이버폭력예방", "폭력을예방"]
+            ],
+            "note": "실제 광고 문구를 묻는 문항이므로 비슷한 뜻의 임의 문구는 인정하지 않습니다."
+        },
+        "2번 문항 | 선택된 이미지": {
+            "model_answers": [
+                "스마트폰으로 단체 채팅을 하는 학생들의 모습이 선택되었다.",
+                "메시지가 올 때마다 아파하는 피해 학생의 모습이 선택되었다."
+            ],
+            "required_any": [
+                ["스마트폰", "단체채팅", "채팅방", "메시지", "학생"],
+                ["아파하는학생", "상처받는학생", "고통받는학생", "피해학생"]
+            ],
+            "forbidden": [
+                ["톡쳤을뿐인데", "톡", "툭"],
+                ["모두즐거워", "아무도상처받지않"]
+            ],
+            "note": "구체적인 시각 요소가 드러나면 인정합니다."
+        },
+        "3번 문항 | 제작자의 관점": {
+            "model_answers": [
+                "온라인에서 장난처럼 던진 말도 상대에게 상처를 주는 폭력이 될 수 있다고 본다.",
+                "인터넷에서 한 말도 다른 사람에게 상처를 줄 수 있다고 본다."
+            ],
+            "required_all": [
+                ["온라인", "인터넷", "sns", "채팅", "메신저", "단톡", "단체채팅"],
+                ["말", "장난", "댓글", "메시지"],
+                ["상처", "아프", "폭력", "해", "피해"]
+            ],
+            "forbidden": [
+                ["예방하려", "하지말자", "조심하자", "바르게사용", "올바르게사용"]
+            ],
+            "note": "‘관점’은 제작자가 대상을 어떻게 바라보는지에 대한 판단이어야 합니다."
+        },
+        "4번 문항 | 제작자의 의도": {
+            "model_answers": [
+                "청소년들이 자신의 온라인 언어생활을 돌아보고 사이버 폭력을 예방하도록 하려는 것이다.",
+                "온라인에서 상대에게 상처를 주는 말을 하지 않도록 하려는 것이다."
+            ],
+            "required_any": [
+                ["사이버폭력", "온라인폭력", "채팅폭력", "언어폭력"],
+                ["상처주는말", "상처를주는말", "나쁜말", "악성댓글", "해로운말"],
+                ["온라인언어생활", "인터넷언어생활", "온라인말", "인터넷말"]
+            ],
+            "conclusion_any": [
+                ["예방", "막", "줄이", "하지않", "하지말", "조심", "돌아보", "바르게", "올바르게"]
+            ],
+            "forbidden": [
+                ["폭력이될수있다고본다", "상처를줄수있다고본다"]
+            ],
+            "note": "행동 변화 또는 예방이라는 최종 목적이 드러나야 합니다."
+        },
+    },
+
+    "2번 광고 | 빙그레 똑같을까? 다를까?": {
+        "1번 문항 | 선택된 문구": {
+            "model_answers": [
+                "‘똑같을까? 다를까?’라는 문구가 선택되었다.",
+                "‘오리지널’, ‘무가당’이라는 문구가 선택되었다."
+            ],
+            "required_any": [
+                ["똑같을까다를까"],
+                ["오리지널"],
+                ["무가당"]
+            ],
+            "forbidden": [
+                ["두제품을맛보", "사람들이맛보", "밝은분위기"],
+                ["구매하도록", "사먹도록"]
+            ],
+            "note": "실제 광고 문구를 제시해야 합니다."
+        },
+        "2번 문항 | 선택된 이미지": {
+            "model_answers": [
+                "오리지널 바나나맛 우유와 무가당 바나나맛 우유가 함께 제시되었다.",
+                "두 제품을 맛보고 의견을 나누는 사람들의 모습이 선택되었다."
+            ],
+            "required_any": [
+                ["오리지널", "무가당", "바나나맛우유"],
+                ["맛보", "먹어보", "마셔보", "비교", "의견", "사람"]
+            ],
+            "forbidden": [
+                ["똑같을까다를까"],
+                ["가격", "단점", "부정적평가"]
+            ],
+            "note": "‘밝은 분위기’만 단독으로 적으면 불충분합니다."
+        },
+        "3번 문항 | 배제된 문구": {
+            "model_answers": [
+                "제품의 단점에 관한 문구가 배제되었다.",
+                "맛에 대한 부정적인 평가가 배제되었다.",
+                "가격 정보가 배제되었다."
+            ],
+            "required_any": [
+                ["단점", "나쁜점", "문제점"],
+                ["부정적평가", "맛없", "별로", "부정적인맛"],
+                ["가격", "비용"]
+            ],
+            "forbidden": [
+                ["제품을싫어하는사람", "실망하는사람"],
+                ["무가당", "오리지널", "똑같을까다를까"]
+            ],
+            "note": "배제된 ‘문구/정보’를 답해야 하며, 배제된 이미지를 답하면 오답입니다."
+        },
+        "4번 문항 | 제작자의 의도": {
+            "model_answers": [
+                "두 제품의 맛 차이에 대한 궁금증을 유발하여 소비자가 직접 구매해 맛보도록 하려는 것이다.",
+                "소비자가 무가당 제품을 직접 사서 맛보도록 유도하려는 것이다."
+            ],
+            "required_any": [
+                ["구매", "사먹", "사서", "사게", "구입"],
+                ["맛보", "먹어보", "마셔보", "직접먹", "직접마시"]
+            ],
+            "forbidden": [
+                ["비슷하게맛있다고본다", "맛있는제품이라고본다"],
+                ["차이를설명하려", "정보를알려주려"]
+            ],
+            "note": "‘궁금증 유발’은 전략일 뿐, 구매·음용 유도라는 최종 목적이 드러나야 통과합니다."
+        },
+    },
+
+    "3번 광고 | 이민 갈 행성은 없습니다": {
+        "1번 문항 | 선택된 문구": {
+            "model_answers": [
+                "‘이민 갈 행성은 없습니다.’라는 문구가 선택되었다.",
+                "지구보다 살기 좋은 별은 아직 발견되지 않았다는 내용의 문구가 선택되었다."
+            ],
+            "required_any": [
+                ["이민갈행성은없습니다"],
+                ["지구보다살기좋은", "별", "발견되지않"],
+                ["살기좋은행성", "없"]
+            ],
+            "forbidden": [
+                ["환경을보호", "지구를보호"],
+                ["황량한행성", "여행가방"]
+            ],
+            "note": "첫 문구는 실제 문구 그대로, 두 번째는 의미가 정확하면 인정합니다."
+        },
+        "2번 문항 | 선택된 이미지": {
+            "model_answers": [
+                "황량한 다른 행성이 선택되었다.",
+                "다른 행성에 놓인 여행 가방의 이미지가 선택되었다."
+            ],
+            "required_any": [
+                ["황량", "메마른", "삭막", "살기어려워", "다른행성", "다른별"],
+                ["여행가방", "가방", "캐리어"]
+            ],
+            "forbidden": [
+                ["아름다운행성", "풍요로운행성", "살기좋은행성"],
+                ["이민갈행성은없습니다"]
+            ],
+            "note": "‘행성’만 쓰기보다 황량함이나 가방 등 구체적 이미지가 드러나야 합니다."
+        },
+        "3번 문항 | 배제된 이미지": {
+            "model_answers": [
+                "사람이 살기 좋은 아름답고 풍요로운 다른 행성의 이미지가 배제되었다.",
+                "지구처럼 사람이 살 수 있는 쾌적한 다른 행성의 모습이 배제되었다."
+            ],
+            "required_all": [
+                ["행성", "별"],
+                ["살기좋", "사람이살", "아름답", "풍요롭", "쾌적", "좋은환경"]
+            ],
+            "forbidden": [
+                ["황량", "메마른", "삭막"],
+                ["여행가방", "캐리어"]
+            ],
+            "note": "선택된 ‘황량한 행성’과 반대되는, 사람이 살기 좋은 다른 행성의 이미지여야 합니다."
+        },
+        "4번 문항 | 제작자의 의도": {
+            "model_answers": [
+                "환경 보호의 필요성을 깨닫고 지구를 보호하도록 설득하려는 것이다.",
+                "사람들이 환경을 보호하고 지구를 아끼도록 하려는 것이다."
+            ],
+            "required_any": [
+                ["환경보호", "환경을보호", "환경을지키", "환경을아끼", "환경을보전"],
+                ["지구보호", "지구를보호", "지구를지키", "지구를아끼", "지구를보전"]
+            ],
+            "forbidden": [
+                ["대체할수없는공간이라고본다", "소중한공간이라고본다"],
+                ["다른행성이없다는것을알려"]
+            ],
+            "note": "환경 또는 지구 보호라는 최종 방향이 반드시 드러나야 합니다."
+        },
+    },
+
+    "4번 광고 | 코카콜라 마시자 코카·콜라!": {
+        "1번 문항 | 선택된 문구": {
+            "model_answers": [
+                "‘마시자 코카·콜라!’라는 문구가 선택되었다."
+            ],
+            "required_any": [
+                ["마시자코카콜라"]
+            ],
+            "forbidden": [
+                ["행복한순간", "즐거운순간"],
+                ["구매하도록", "사도록"]
+            ],
+            "note": "실제 광고 문구를 제시해야 합니다."
+        },
+        "2번 문항 | 선택된 이미지": {
+            "model_answers": [
+                "즐겁게 뛰는 가족의 모습이 선택되었다.",
+                "맑은 하늘과 해변의 이미지가 선택되었다.",
+                "크고 시원해 보이는 코카콜라 병의 이미지가 선택되었다."
+            ],
+            "required_any": [
+                ["즐겁", "행복", "가족", "뛰는가족"],
+                ["맑은하늘", "해변", "바다", "바닷가"],
+                ["코카콜라병", "콜라병", "시원해보", "큰병"]
+            ],
+            "forbidden": [
+                ["마시자코카콜라"],
+                ["제품을싫어", "실망하는사람"]
+            ],
+            "note": "구체적인 시각 요소가 드러나야 합니다."
+        },
+        "3번 문항 | 배제된 문구": {
+            "model_answers": [
+                "코카콜라의 단점에 관한 문구가 배제되었다.",
+                "코카콜라에 대한 부정적인 내용의 문구가 배제되었다."
+            ],
+            "required_any": [
+                ["단점", "나쁜점", "문제점"],
+                ["부정적", "좋지않", "나쁜내용", "불리한내용"]
+            ],
+            "forbidden": [
+                ["제품을싫어하는사람", "실망하는사람", "불쾌한상황"],
+                ["마시자코카콜라"]
+            ],
+            "note": "문항이 ‘배제된 문구’를 묻기 때문에 사람·장면 같은 이미지 답변은 오답 처리합니다."
+        },
+        "4번 문항 | 광고 제작자의 관점": {
+            "model_answers": [
+                "코카콜라는 즐겁고 행복한 순간에 어울리는 음료라고 본다.",
+                "코카콜라를 즐거움과 행복을 주는 음료로 바라본다."
+            ],
+            "required_all": [
+                ["코카콜라", "콜라", "음료"],
+                ["즐겁", "행복", "좋은순간", "즐거운순간", "행복한순간"]
+            ],
+            "forbidden": [
+                ["구매하도록", "사도록", "마시도록", "음용하도록"]
+            ],
+            "note": "관점은 제품에 대한 제작자의 판단이어야 하며, 구매 유도 같은 ‘의도’를 쓰면 오답입니다."
+        },
+        "5번 문항 | 광고 제작자의 의도": {
+            "model_answers": [
+                "코카콜라에 긍정적인 이미지를 부여하여 소비자가 제품을 구매하거나 마시도록 유도하려는 것이다.",
+                "소비자가 코카콜라를 사거나 마시도록 하려는 것이다."
+            ],
+            "required_any": [
+                ["구매", "사게", "사도록", "구입"],
+                ["마시도록", "마시게", "음용", "먹도록"]
+            ],
+            "forbidden": [
+                ["행복한음료라고본다", "즐거운음료라고본다"],
+                ["가족의행복을알리"]
+            ],
+            "note": "‘긍정적 이미지 형성’만 있고 구매·음용 유도가 없으면 불충분합니다."
+        },
+    },
+}
+
+
+
+# ------------------------------------------------------------
+# 3) 광고 자료(영상/이미지)
+# ------------------------------------------------------------
+
+MEDIA = {
+    "1번 광고 | 톡 쳤을 뿐인데": {
+        "type": "video",
+        "src": "https://www.youtube.com/watch?v=1oJVTGnDySc",
+        "caption": "영상 공익광고 | 공익광고협의회 「톡 쳤을 뿐인데」"
+    },
+    "2번 광고 | 빙그레 똑같을까? 다를까?": {
+        "type": "video",
+        "src": "https://www.youtube.com/watch?v=EAcTDhAKQZc",
+        "caption": "영상 상업광고 | 빙그레 「똑같을까? 다를까?」"
+    },
+    "3번 광고 | 이민 갈 행성은 없습니다": {
+        "type": "image",
+        "src": "media/ad3_planet.jpg",
+        "caption": "공익광고 | 「이민 갈 행성은 없습니다」"
+    },
+    "4번 광고 | 코카콜라 마시자 코카·콜라!": {
+        "type": "image",
+        "src": "media/ad4_cocacola.jpg",
+        "caption": "상업광고 | 코카콜라 「마시자 코카·콜라!」"
+    },
+}
+
+
+def show_media(ad_name):
+    """선택한 광고의 영상 또는 이미지를 문항 위에 표시."""
+    media = MEDIA.get(ad_name)
+
+    if not media:
+        return
+
+    st.subheader("🎬 광고 자료")
+
+    if media["type"] == "video":
+        st.video(media["src"])
+    elif media["type"] == "image":
+        try:
+            st.image(media["src"], use_container_width=True)
+        except Exception:
+            st.warning(
+                "광고 이미지 파일을 불러오지 못했습니다. "
+                "GitHub 저장소의 media 폴더에 이미지 파일이 있는지 확인해 주세요."
+            )
+
+    st.caption(media.get("caption", ""))
+    st.divider()
+
+
+# ------------------------------------------------------------
+# 3) 채점 함수
+# ------------------------------------------------------------
+
+def grade_answer(rule, answer):
+    answer = answer or ""
+
+    if not answer.strip():
+        return False, "답안을 입력하지 않았습니다."
+
+    # 오개념/개념 혼동 우선 차단
+    if misconception_hit(answer, rule.get("forbidden", [])):
+        return False, "문항에서 요구한 개념과 다른 개념의 설명이 포함되어 있습니다."
+
+    # 모든 필수 의미군
+    required_all = rule.get("required_all", [])
+    if required_all and not all_groups_hit(answer, required_all):
+        return False, "필수 의미 요소가 충분히 드러나지 않았습니다."
+
+    # 선택지형: 여러 대안 중 하나
+    required_any = rule.get("required_any", [])
+    if required_any and not any_group_hit(answer, required_any):
+        return False, "정답으로 인정되는 핵심 의미 또는 표현이 포함되지 않았습니다."
+
+    # 결론 방향이 필요한 문항
+    conclusion_any = rule.get("conclusion_any", [])
+    if conclusion_any and not any_group_hit(answer, conclusion_any):
+        return False, "제작자의 최종 목적이나 행동 변화의 방향이 명확하지 않습니다."
+
+    return True, "핵심 의미가 충족되었습니다."
+
+
+# ------------------------------------------------------------
+# 4) 순차 학습 진행 함수
+# ------------------------------------------------------------
+
+AD_NAMES = list(RULES.keys())
+
+def get_question_names(ad_idx):
+    return list(RULES[AD_NAMES[ad_idx]].keys())
+
+def advance_to_next_question():
+    """정답을 맞힌 뒤 다음 문항/다음 광고로 자동 이동."""
+    ad_idx = st.session_state.current_ad_idx
+    q_idx = st.session_state.current_q_idx
+    questions = get_question_names(ad_idx)
+
+    if q_idx < len(questions) - 1:
+        # 같은 광고의 다음 문항
+        st.session_state.current_q_idx += 1
+        st.session_state.flash_message = "✅ 정답입니다! 다음 문항으로 이동했습니다."
+    elif ad_idx < len(AD_NAMES) - 1:
+        # 다음 광고의 1번 문항
+        st.session_state.current_ad_idx += 1
+        st.session_state.current_q_idx = 0
+        next_ad = AD_NAMES[st.session_state.current_ad_idx]
+        st.session_state.flash_message = f"🎉 이 광고의 문항을 모두 풀었습니다! 다음 광고로 이동합니다: {next_ad}"
+    else:
+        # 마지막 광고의 마지막 문항까지 완료
+        st.session_state.completed = True
+        st.session_state.flash_message = "🏆 모든 광고의 문항을 완료했습니다!"
+
+def reset_learning():
+    """처음부터 다시 시작."""
+    keys_to_delete = [
+        k for k in st.session_state.keys()
+        if k.startswith("attempts::") or k.startswith("answer::")
+    ]
+    for k in keys_to_delete:
+        del st.session_state[k]
+
+    st.session_state.current_ad_idx = 0
+    st.session_state.current_q_idx = 0
+    st.session_state.completed = False
+    st.session_state.flash_message = "처음부터 다시 시작합니다."
+
+
+# ------------------------------------------------------------
+# 5) Streamlit UI
+# ------------------------------------------------------------
+
+st.title("📝 광고·홍보물 분석 자동 채점")
+st.caption("중학교 2학년 국어 | 광고와 홍보물의 재현 방식 분석")
+
+st.info(
+    "문항을 맞히면 자동으로 다음 문항으로 이동합니다. "
+    "한 광고의 문항을 모두 풀면 다음 광고로 자동 이동합니다. "
+    "같은 문항을 두 번 틀리면 모범답안과 채점 기준을 확인할 수 있습니다."
+)
+
+# 진행 상태 초기화
+if "current_ad_idx" not in st.session_state:
+    st.session_state.current_ad_idx = 0
+if "current_q_idx" not in st.session_state:
+    st.session_state.current_q_idx = 0
+if "completed" not in st.session_state:
+    st.session_state.completed = False
+if "flash_message" not in st.session_state:
+    st.session_state.flash_message = ""
+
+# 이전 채점 결과에 따른 안내 메시지
+if st.session_state.flash_message:
+    st.success(st.session_state.flash_message)
+    st.session_state.flash_message = ""
+
+# 전체 진행률 계산
+total_questions = sum(len(qs) for qs in RULES.values())
+completed_before = 0
+for i in range(st.session_state.current_ad_idx):
+    completed_before += len(RULES[AD_NAMES[i]])
+completed_before += st.session_state.current_q_idx
+
+if st.session_state.completed:
+    completed_count = total_questions
+else:
+    completed_count = completed_before
+
+progress = completed_count / total_questions if total_questions else 0
+st.progress(progress)
+st.caption(f"전체 진행: {completed_count} / {total_questions} 문항 완료")
+
+# 모든 문항 완료 화면
+if st.session_state.completed:
+    st.balloons()
+    st.success("🎉 1번 광고부터 4번 광고까지 모든 문항을 완료했습니다!")
+    if st.button("처음부터 다시 풀기", use_container_width=True):
+        reset_learning()
+        st.rerun()
+
+else:
+    ad_idx = st.session_state.current_ad_idx
+    q_idx = st.session_state.current_q_idx
+
+    ad_name = AD_NAMES[ad_idx]
+    question_names = get_question_names(ad_idx)
+    question_name = question_names[q_idx]
+    rule = RULES[ad_name][question_name]
+
+    st.markdown(f"### {ad_name}")
+    st.caption(
+        f"현재 위치: 광고 {ad_idx + 1} / {len(AD_NAMES)} · "
+        f"문항 {q_idx + 1} / {len(question_names)}"
+    )
+
+    # 선택한 광고의 영상/이미지를 문항 위에 표시
+    show_media(ad_name)
+
+    st.subheader(f"✏️ {question_name}")
+
+    # 문항별 오답 횟수를 세션에 저장
+    attempt_key = f"attempts::{ad_name}::{question_name}"
+    if attempt_key not in st.session_state:
+        st.session_state[attempt_key] = 0
+
+    answer_key = f"answer::{ad_name}::{question_name}"
+    answer = st.text_area(
+        "학생 답안",
+        height=130,
+        placeholder="학생의 답안을 입력하세요.",
+        key=answer_key
+    )
+
+    if st.button("채점하기", type="primary", use_container_width=True):
+        passed, feedback = grade_answer(rule, answer)
+
+        if passed:
+            # 현재 문항 답안을 지우고 다음 문항으로 이동
+            if answer_key in st.session_state:
+                del st.session_state[answer_key]
+            advance_to_next_question()
+            st.rerun()
+
+        else:
+            st.session_state[attempt_key] += 1
+            wrong_count = st.session_state[attempt_key]
+
+            st.error(f"❌ 정답으로 인정하기 어렵습니다. (오답 {wrong_count}회)")
+            st.write("**채점 피드백:**", feedback)
+
+            # 2회 이상 틀린 경우에만 모범답안과 채점 기준 공개
+            if wrong_count >= 2:
+                st.warning("두 번 이상 틀렸습니다. 아래의 모범답안과 채점 기준을 확인해 보세요.")
+
+                with st.expander("📌 모범 답안 및 채점 기준 보기", expanded=True):
+                    st.markdown("**모범 답안**")
+                    for i, ans in enumerate(rule["model_answers"], 1):
+                        st.write(f"{i}. {ans}")
+
+                    st.markdown("**채점 메모**")
+                    st.write(rule["note"])
+            else:
+                st.info("한 번 더 생각해서 다시 답해 보세요. 모범답안은 두 번 틀렸을 때부터 확인할 수 있습니다.")
+
+    # 교사용/점검용 수동 이동 기능
+    with st.expander("⚙️ 교사용 문항 이동 / 진행 초기화"):
+        st.caption("학생용 수업에서는 이 부분을 접어 두면 됩니다.")
+
+        jump_ad = st.selectbox(
+            "이동할 광고",
+            AD_NAMES,
+            index=ad_idx,
+            key="teacher_jump_ad"
+        )
+        jump_questions = list(RULES[jump_ad].keys())
+        default_q_idx = q_idx if jump_ad == ad_name and q_idx < len(jump_questions) else 0
+        jump_q = st.selectbox(
+            "이동할 문항",
+            jump_questions,
+            index=default_q_idx,
+            key="teacher_jump_q"
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("선택한 문항으로 이동", use_container_width=True):
+                st.session_state.current_ad_idx = AD_NAMES.index(jump_ad)
+                st.session_state.current_q_idx = jump_questions.index(jump_q)
+                st.session_state.completed = False
+                st.session_state.flash_message = "교사용 수동 이동을 적용했습니다."
+                st.rerun()
+
+        with col2:
+            if st.button("전체 진행 초기화", use_container_width=True):
+                reset_learning()
+                st.rerun()
+
+
+st.divider()
+
+st.subheader("📋 전체 문항 빠른 채점")
+st.caption("교사용 점검 기능: 한 광고의 모든 문항을 한 번에 입력하고 채점할 수 있습니다.")
+
+bulk_ad = st.selectbox(
+    "전체 채점할 광고",
+    list(RULES.keys()),
+    key="bulk_ad"
+)
+
+bulk_answers = {}
+for q in RULES[bulk_ad]:
+    bulk_answers[q] = st.text_input(q, key=f"bulk::{bulk_ad}::{q}")
+
+if st.button("전체 문항 채점", use_container_width=True):
+    score = 0
+    total = len(RULES[bulk_ad])
+
+    for q, ans in bulk_answers.items():
+        passed, feedback = grade_answer(RULES[bulk_ad][q], ans)
+        if passed:
+            score += 1
+            st.success(f"{q}: 정답")
+        else:
+            st.error(f"{q}: 오답 — {feedback}")
+
+    st.metric("점수", f"{score} / {total}")
+
+
+st.divider()
+
+st.caption(
+    "주의: 이 앱은 규칙 기반 채점기입니다. 학생이 매우 창의적인 문장으로 의미를 표현하면 "
+    "현재 등록된 허용 표현에 없어서 오답 처리될 수 있습니다. 실제 수업에서 나온 답안을 "
+    "수집한 뒤 동의 표현을 지속적으로 추가하면 정확도가 높아집니다."
+)
